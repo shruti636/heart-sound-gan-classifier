@@ -12,56 +12,86 @@ from gan_model import build_generator, build_discriminator
 np.random.seed(42)
 tf.random.set_seed(42)
 
-def discriminator_loss(real_output, fake_output):
+def gradient_penalty(critic, real_images, fake_images):
     """
-    Computes binary cross-entropy loss for the discriminator.
-    We want real images to be classified as 1, and fake images as 0.
+    Computes the gradient penalty for WGAN-GP.
+    Enforces the Lipschitz-1 constraint on the critic.
     """
-    cross_entropy = tf.keras.losses.BinaryCrossentropy()
-    real_loss = cross_entropy(tf.ones_like(real_output), real_output)
-    fake_loss = cross_entropy(tf.zeros_like(fake_output), fake_output)
-    total_loss = real_loss + fake_loss
-    return total_loss
+    batch_size = tf.shape(real_images)[0]
+    # alpha mixes real and fake samples sample-by-sample
+    alpha = tf.random.uniform([batch_size, 1, 1], 0.0, 1.0)
+    diff = fake_images - real_images
+    interpolates = real_images + alpha * diff
+    
+    with tf.GradientTape() as gp_tape:
+        gp_tape.watch(interpolates)
+        critic_pred = critic(interpolates, training=True)
+        
+    grads = gp_tape.gradient(critic_pred, [interpolates])[0]
+    # Compute L2 norm over time (axis 1) and features (axis 2)
+    norm = tf.sqrt(tf.reduce_sum(tf.square(grads), axis=[1, 2]) + 1e-12)
+    gp = tf.reduce_mean((norm - 1.0) ** 2)
+    return gp
+
+def critic_loss(real_output, fake_output):
+    """
+    Wasserstein loss for the Critic.
+    Critic wants to maximize (real_output - fake_output), i.e., minimize (fake - real).
+    """
+    return tf.reduce_mean(fake_output) - tf.reduce_mean(real_output)
 
 def generator_loss(fake_output):
     """
-    Computes binary cross-entropy loss for the generator.
-    The generator wants the discriminator to classify fake images as 1.
+    Wasserstein loss for the Generator.
+    Generator wants to maximize fake_output, i.e., minimize -fake_output.
     """
-    cross_entropy = tf.keras.losses.BinaryCrossentropy()
-    return cross_entropy(tf.ones_like(fake_output), fake_output)
+    return -tf.reduce_mean(fake_output)
 
-class GAN:
-    def __init__(self, latent_dim=100, img_shape=(64, 13)):
+class WGAN_GP:
+    def __init__(self, latent_dim=100, img_shape=(64, 39), gp_weight=10.0):
         self.latent_dim = latent_dim
         self.img_shape = img_shape
+        self.gp_weight = gp_weight
         
         self.generator = build_generator(self.latent_dim)
-        self.discriminator = build_discriminator(self.img_shape)
+        self.discriminator = build_discriminator(self.img_shape) # acts as the Critic
         
-        self.generator_optimizer = Adam(learning_rate=0.0002, beta_1=0.5)
-        self.discriminator_optimizer = Adam(learning_rate=0.0002, beta_1=0.5)
+        # TTUR (Two Time-Scale Update Rule): learning rate 1e-4, beta_1=0.0, beta_2=0.9
+        self.generator_optimizer = Adam(learning_rate=0.0001, beta_1=0.0, beta_2=0.9)
+        self.discriminator_optimizer = Adam(learning_rate=0.0001, beta_1=0.0, beta_2=0.9)
         
     @tf.function
-    def train_step(self, mfccs):
-        noise = tf.random.normal([mfccs.shape[0], self.latent_dim])
+    def train_step_critic(self, real_images):
+        batch_size = tf.shape(real_images)[0]
+        noise = tf.random.normal([batch_size, self.latent_dim])
         
-        with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
-            generated_mfccs = self.generator(noise, training=True)
+        with tf.GradientTape() as critic_tape:
+            fake_images = self.generator(noise, training=True)
             
-            real_output = self.discriminator(mfccs, training=True)
-            fake_output = self.discriminator(generated_mfccs, training=True)
+            real_output = self.discriminator(real_images, training=True)
+            fake_output = self.discriminator(fake_images, training=True)
             
-            gen_loss = generator_loss(fake_output)
-            disc_loss = discriminator_loss(real_output, fake_output)
+            c_loss = critic_loss(real_output, fake_output)
+            gp = gradient_penalty(self.discriminator, real_images, fake_images)
             
-        gradients_of_generator = gen_tape.gradient(gen_loss, self.generator.trainable_variables)
-        gradients_of_discriminator = disc_tape.gradient(disc_loss, self.discriminator.trainable_variables)
+            total_c_loss = c_loss + self.gp_weight * gp
+            
+        grads = critic_tape.gradient(total_c_loss, self.discriminator.trainable_variables)
+        self.discriminator_optimizer.apply_gradients(zip(grads, self.discriminator.trainable_variables))
+        return total_c_loss
         
-        self.generator_optimizer.apply_gradients(zip(gradients_of_generator, self.generator.trainable_variables))
-        self.discriminator_optimizer.apply_gradients(zip(gradients_of_discriminator, self.discriminator.trainable_variables))
+    @tf.function
+    def train_step_generator(self, batch_size):
+        noise = tf.random.normal([batch_size, self.latent_dim])
         
-        return gen_loss, disc_loss
+        with tf.GradientTape() as gen_tape:
+            fake_images = self.generator(noise, training=True)
+            fake_output = self.discriminator(fake_images, training=True)
+            g_loss = generator_loss(fake_output)
+            
+        grads = gen_tape.gradient(g_loss, self.generator.trainable_variables)
+        self.generator_optimizer.apply_gradients(zip(grads, self.generator.trainable_variables))
+        return g_loss
 
 def save_gan_plots(generator, epoch, latent_dim, bounds=None, out_dir='outputs/mfcc_plots'):
     """
@@ -76,7 +106,7 @@ def save_gan_plots(generator, epoch, latent_dim, bounds=None, out_dir='outputs/m
     fig, axes = plt.subplots(1, num_examples, figsize=(16, 4))
     
     for i in range(num_examples):
-        # Shape: (64, 13)
+        # Shape: (64, 39)
         mfcc = predictions[i]
         
         if bounds is not None:
@@ -84,7 +114,7 @@ def save_gan_plots(generator, epoch, latent_dim, bounds=None, out_dir='outputs/m
             m_min, m_max = bounds[i]
             mfcc = ((mfcc + 1.0) / 2.0) * (m_max - m_min) + m_min
             
-        # Transpose back to (13, 64) for display (standard representation: coefficients as Y, time as X)
+        # Transpose back to (39, 64) for display (standard representation: coefficients as Y, time as X)
         mfcc_display = mfcc.T
         
         im = axes[i].imshow(mfcc_display, cmap='coolwarm', aspect='auto', origin='lower')
@@ -107,37 +137,48 @@ def train_gan_pipeline(epochs=50, batch_size=32, latent_dim=100, processed_dir='
     X_abnormal = X_mfcc[abnormal_idx]
     bounds_abnormal = bounds[abnormal_idx]
     
-    print(f"Loaded {len(X_abnormal)} abnormal MFCC samples for training the GAN.")
+    print(f"Loaded {len(X_abnormal)} abnormal MFCC samples for training the WGAN-GP.")
     
     if len(X_abnormal) == 0:
         raise ValueError("No abnormal samples found in dataset! Cannot train GAN.")
         
     dataset = tf.data.Dataset.from_tensor_slices(X_abnormal).shuffle(len(X_abnormal)).batch(batch_size, drop_remainder=False)
     
-    # Initialize 1D GAN
-    gan = GAN(latent_dim=latent_dim, img_shape=X_abnormal.shape[1:])
+    # Initialize WGAN-GP
+    gan = WGAN_GP(latent_dim=latent_dim, img_shape=X_abnormal.shape[1:])
     
     gen_losses = []
     disc_losses = []
     
-    print("Starting GAN training...")
+    print("Starting WGAN-GP training...")
+    
+    step = 0
+    n_critic = 3 # Number of Critic updates per Generator update
     
     for epoch in range(1, epochs + 1):
         epoch_gen_loss = []
         epoch_disc_loss = []
         
         for mfcc_batch in dataset:
-            g_loss, d_loss = gan.train_step(mfcc_batch)
-            epoch_gen_loss.append(g_loss.numpy())
+            batch_size_curr = tf.shape(mfcc_batch)[0]
+            # Update Critic
+            d_loss = gan.train_step_critic(mfcc_batch)
             epoch_disc_loss.append(d_loss.numpy())
             
-        mean_g_loss = np.mean(epoch_gen_loss)
+            # Update Generator every n_critic steps
+            if step % n_critic == 0:
+                g_loss = gan.train_step_generator(batch_size_curr)
+                epoch_gen_loss.append(g_loss.numpy())
+                
+            step += 1
+            
+        mean_g_loss = np.mean(epoch_gen_loss) if len(epoch_gen_loss) > 0 else (gen_losses[-1] if len(gen_losses) > 0 else 0.0)
         mean_d_loss = np.mean(epoch_disc_loss)
         gen_losses.append(mean_g_loss)
         disc_losses.append(mean_d_loss)
         
         if epoch % 10 == 0 or epoch == 1 or epoch == epochs:
-            print(f"Epoch {epoch}/{epochs} | Gen Loss: {mean_g_loss:.4f} | Disc Loss: {mean_d_loss:.4f}")
+            print(f"Epoch {epoch}/{epochs} | Gen Loss: {mean_g_loss:.4f} | Critic Loss: {mean_d_loss:.4f}")
             # Save visual plots of MFCC heatmaps
             save_gan_plots(gan.generator, epoch, latent_dim, bounds_abnormal, os.path.join(outputs_dir, 'mfcc_plots'))
             
@@ -152,10 +193,10 @@ def train_gan_pipeline(epochs=50, batch_size=32, latent_dim=100, processed_dir='
     os.makedirs(plot_dir, exist_ok=True)
     plt.figure(figsize=(10, 5))
     plt.plot(range(1, epochs + 1), gen_losses, label='Generator Loss', color='#1f77b4', linewidth=2)
-    plt.plot(range(1, epochs + 1), disc_losses, label='Discriminator Loss', color='#ff7f0e', linewidth=2)
-    plt.title('GAN Training Losses (MFCC-based)', fontsize=14, fontweight='bold')
+    plt.plot(range(1, epochs + 1), disc_losses, label='Critic Loss', color='#ff7f0e', linewidth=2)
+    plt.title('WGAN-GP Training Losses (Wasserstein Distance)', fontsize=14, fontweight='bold')
     plt.xlabel('Epochs', fontsize=12)
-    plt.ylabel('Binary Cross-Entropy Loss', fontsize=12)
+    plt.ylabel('Wasserstein Loss', fontsize=12)
     plt.legend(fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.tight_layout()
@@ -172,13 +213,14 @@ def train_gan_pipeline(epochs=50, batch_size=32, latent_dim=100, processed_dir='
     np.save(os.path.join(synth_dir, 'synth_abnormal_mfcc.npy'), synth_mfcc)
     
     print(f"Saved 50 synthetic abnormal MFCC samples to {os.path.join(synth_dir, 'synth_abnormal_mfcc.npy')}")
-    print("GAN training pipeline finished!")
+    print("WGAN-GP training pipeline finished!")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Train 1D GAN model on Abnormal MFCCs")
+    parser = argparse.ArgumentParser(description="Train WGAN-GP model on Abnormal MFCCs")
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs to train GAN')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--latent_dim', type=int, default=100, help='Dimension of latent space')
     
     args = parser.parse_args()
     train_gan_pipeline(epochs=args.epochs, batch_size=args.batch_size, latent_dim=args.latent_dim)
+

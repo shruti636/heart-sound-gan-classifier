@@ -56,25 +56,54 @@ def segment_signal(y, segment_len=5040, overlap=0):
 
 def extract_features(y, fs=2000, n_fft=256, hop_length=80, n_mfcc=13):
     """
-    Extracts MFCC features from a segment of audio.
-    For N=5040, n_fft=256, hop_length=80, this returns:
-    - MFCC: shape (64, 13) (time steps first)
+    Extracts 13 MFCCs, Delta MFCCs, and Delta-Delta MFCCs from a segment of audio.
+    Concatenates them to form a (64, 39) feature matrix.
     """
+    # 1. Base MFCCs
     mfcc = librosa.feature.mfcc(y=y, sr=fs, n_fft=n_fft, hop_length=hop_length, n_mfcc=n_mfcc, center=True)
     
-    # Min-max scale MFCCs to [-1, 1] range
-    m_min, m_max = mfcc.min(), mfcc.max()
-    if m_max - m_min > 0:
-        mfcc_norm = 2.0 * (mfcc - m_min) / (m_max - m_min) - 1.0
+    # 2. First derivative (Delta MFCC)
+    delta = librosa.feature.delta(mfcc)
+    
+    # 3. Second derivative (Delta-Delta MFCC)
+    delta2 = librosa.feature.delta(mfcc, order=2)
+    
+    # Concatenate features vertically along the feature axis -> shape (39, 64)
+    features = np.vstack([mfcc, delta, delta2])
+    
+    # Min-max scale base MFCCs (first 13 features) together
+    mfcc_part = features[:13]
+    f_min, f_max = mfcc_part.min(), mfcc_part.max()
+    if f_max - f_min > 0:
+        mfcc_norm = 2.0 * (mfcc_part - f_min) / (f_max - f_min) - 1.0
     else:
-        mfcc_norm = np.zeros_like(mfcc)
+        mfcc_norm = np.zeros_like(mfcc_part)
         
-    # Transpose to (time_steps, features) -> (64, 13)
-    mfcc_norm_t = mfcc_norm.T
+    # Min-max scale Delta features (13 to 26) together
+    delta_part = features[13:26]
+    d_min, d_max = delta_part.min(), delta_part.max()
+    if d_max - d_min > 0:
+        delta_norm = 2.0 * (delta_part - d_min) / (d_max - d_min) - 1.0
+    else:
+        delta_norm = np.zeros_like(delta_part)
+        
+    # Min-max scale Delta-Delta features (26 to 39) together
+    delta2_part = features[26:39]
+    d2_min, d2_max = delta2_part.min(), delta2_part.max()
+    if d2_max - d2_min > 0:
+        delta2_norm = 2.0 * (delta2_part - d2_min) / (d2_max - d2_min) - 1.0
+    else:
+        delta2_norm = np.zeros_like(delta2_part)
+        
+    # Concatenate back
+    features_norm = np.vstack([mfcc_norm, delta_norm, delta2_norm])
+    
+    # Transpose to (time_steps, features) -> (64, 39)
+    features_norm_t = features_norm.T
     
     feature_dict = {
-        'mfcc': mfcc_norm_t,
-        'mfcc_bounds': np.array([m_min, m_max])
+        'mfcc': features_norm_t,
+        'mfcc_bounds': np.array([f_min, f_max])
     }
     
     return feature_dict

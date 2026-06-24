@@ -50,15 +50,14 @@ def train_classifier_pipeline(epochs=20, batch_size=16, processed_dir='data/proc
     
     model_nogan = build_cnn_classifier(input_shape=input_shape)
     model_nogan.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss='binary_crossentropy',
         metrics=['accuracy', tf.keras.metrics.Precision(name='precision'), tf.keras.metrics.Recall(name='recall')]
     )
     
     checkpoint_nogan = os.path.join(model_dir, 'cnn_classifier_nogan.keras')
     callbacks_nogan = [
-        EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),
-        ModelCheckpoint(filepath=checkpoint_nogan, monitor='val_loss', save_best_only=True, verbose=1),
+        ModelCheckpoint(filepath=checkpoint_nogan, monitor='val_accuracy', mode='max', save_best_only=True, verbose=1),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=4, min_lr=1e-6, verbose=1)
     ]
     
@@ -80,9 +79,9 @@ def train_classifier_pipeline(epochs=20, batch_size=16, processed_dir='data/proc
     print("  STAGE 2: TRAINING GAN-AUGMENTED MODEL")
     print("="*50)
     
-    # Generate synthetic abnormal MFCCs to balance the training set
+    # Generate synthetic abnormal MFCCs to balance the training set (capped at 3000 to keep training time efficient)
     if num_normal_train > num_abnormal_train:
-        diff = num_normal_train - num_abnormal_train
+        diff = min(num_normal_train - num_abnormal_train, 3000)
         print(f"Generating {diff} synthetic abnormal samples to balance train set...")
         
         gen_path = os.path.join(model_dir, 'gan_generator.keras')
@@ -101,7 +100,44 @@ def train_classifier_pipeline(epochs=20, batch_size=16, processed_dir='data/proc
         X_real_abnormal = X_train[y_train == 1]
         X_real_normal = X_train[y_train == 0]
         
-        X_train_balanced = np.concatenate([X_real_normal, X_real_abnormal, X_synth], axis=0)
+        # Reconstruct and re-extract synthetic samples to align distributions (handles double-conversion phase loss)
+        print("Reconstructing and re-extracting synthetic samples to align distributions...")
+        import librosa
+        from preprocessing import preprocess_signal, extract_features
+        bounds_train = np.load(os.path.join(processed_dir, 'bounds_train.npy'))
+        abnormal_idx = np.where(y_train == 1)[0]
+        avg_bounds = np.mean(bounds_train[abnormal_idx], axis=0)
+        
+        X_synth_processed = []
+        for i in range(diff):
+            synth_features = X_synth[i] # shape (64, 39)
+            synth_mfcc = synth_features[:, :13]
+            mfcc_denorm = ((synth_mfcc + 1.0) / 2.0) * (avg_bounds[1] - avg_bounds[0]) + avg_bounds[0]
+            mfcc_denorm_t = mfcc_denorm.T
+            
+            y_recon = librosa.feature.inverse.mfcc_to_audio(
+                mfcc_denorm_t,
+                sr=2000,
+                n_fft=256,
+                hop_length=80,
+                n_iter=150
+            )
+            max_val = np.max(np.abs(y_recon))
+            if max_val > 0:
+                y_recon = y_recon / max_val
+                
+            y_filt = preprocess_signal(y_recon, fs=2000)
+            if len(y_filt) >= 5040:
+                seg = y_filt[:5040]
+            else:
+                seg = np.pad(y_filt, (0, max(0, 5040 - len(y_filt))))
+                
+            features = extract_features(seg, fs=2000)
+            X_synth_processed.append(features['mfcc'])
+            
+        X_synth_processed = np.array(X_synth_processed, dtype=np.float32)
+        
+        X_train_balanced = np.concatenate([X_real_normal, X_real_abnormal, X_synth_processed], axis=0)
         y_train_balanced = np.concatenate([np.zeros(num_normal_train), np.ones(num_abnormal_train), y_synth], axis=0)
         
         print(f"Augmented balanced training set distribution:")
@@ -114,15 +150,14 @@ def train_classifier_pipeline(epochs=20, batch_size=16, processed_dir='data/proc
         
     model_gan = build_cnn_classifier(input_shape=input_shape)
     model_gan.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss='binary_crossentropy',
         metrics=['accuracy', tf.keras.metrics.Precision(name='precision'), tf.keras.metrics.Recall(name='recall')]
     )
     
     checkpoint_gan = os.path.join(model_dir, 'cnn_classifier_gan.keras')
     callbacks_gan = [
-        EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True, verbose=1),
-        ModelCheckpoint(filepath=checkpoint_gan, monitor='val_loss', save_best_only=True, verbose=1),
+        ModelCheckpoint(filepath=checkpoint_gan, monitor='val_accuracy', mode='max', save_best_only=True, verbose=1),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=4, min_lr=1e-6, verbose=1)
     ]
     

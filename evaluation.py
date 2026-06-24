@@ -47,7 +47,7 @@ def run_tsne_validation(X_real_abnormal, X_generated_abnormal, save_path):
     """
     Applies t-SNE to project real and generated abnormal MFCC features into 2D space.
     """
-    # Flatten shapes: (N, 64, 13) -> (N, 832)
+    # Flatten shapes: (N, 64, 39) -> (N, 2496)
     real_flat = X_real_abnormal.reshape(X_real_abnormal.shape[0], -1)
     gen_flat = X_generated_abnormal.reshape(X_generated_abnormal.shape[0], -1)
     
@@ -259,8 +259,8 @@ def run_evaluation_study(processed_dir='data/processed', model_dir='models', out
         gen_vars = np.var(X_generated_abnormal, axis=(0, 1))
         
         # Spectral centroids proxy (center of mass of MFCCs)
-        real_centroid = np.mean([np.sum(seg * np.arange(13)) / (np.sum(seg) + 1e-6) for seg in X_real_abnormal])
-        gen_centroid = np.mean([np.sum(seg * np.arange(13)) / (np.sum(seg) + 1e-6) for seg in X_generated_abnormal])
+        real_centroid = np.mean([np.sum(seg * np.arange(39)) / (np.sum(seg) + 1e-6) for seg in X_real_abnormal])
+        gen_centroid = np.mean([np.sum(seg * np.arange(39)) / (np.sum(seg) + 1e-6) for seg in X_generated_abnormal])
     else:
         X_generated_abnormal = None
         real_means, real_vars, gen_means, gen_vars = None, None, None, None
@@ -312,7 +312,7 @@ def run_evaluation_study(processed_dir='data/processed', model_dir='models', out
     report_path = os.path.join(outputs_dir, 'final_research_report.md')
     
     # Determine conclusion based on results
-    improved_flag = "improved" if acc_diff > 0 or recall_diff > 0 else "did not improve"
+    improved_flag = "improved" if acc_diff > 0 or rec_diff > 0 else "did not improve"
     max_impr_val = max(acc_diff, rec_diff, f1_diff, auc_diff)
     max_impr_metric = "Accuracy"
     if max_impr_val == rec_diff:
@@ -354,14 +354,14 @@ To ensure scientific rigor, a recording-level split was implemented *before* sig
 ## GAN Validation Analysis
 
 ### 1. t-SNE Feature Space Distribution
-t-SNE dimensionality reduction (from 832 dimensions to 2D) was applied to the abnormal training features (real vs. synthetic). The plot demonstrates:
+t-SNE dimensionality reduction (from 2496 dimensions to 2D) was applied to the abnormal training features (real vs. synthetic). The plot demonstrates:
 * The synthetic features overlap substantially with the real features, indicating that the GAN has successfully captured the underlying feature space distribution of abnormal Phonocardiogram signals.
 * There is no severe mode collapse, showing that the synthetic samples cover the variations in the real data.
 
 ![t-SNE Scatter Plot](C:/Users/Administrator/.gemini/antigravity/brain/3aa12ee8-e339-450e-9a6a-0955397fb492/tsne_real_vs_generated.png)
 
 ### 2. Statistical Similarity
-We compared the distribution statistics of the 13 MFCC coefficients:
+We compared the distribution statistics of the 39 MFCC & Delta features:
 * **Real Abnormal Means (average)**: {np.mean(real_means):.4f} (Variance: {np.mean(real_vars):.4f})
 * **Generated Abnormal Means (average)**: {np.mean(gen_means):.4f} (Variance: {np.mean(gen_vars):.4f})
 * **Average Spectral Centroid (MFCC-index equivalent)**:
