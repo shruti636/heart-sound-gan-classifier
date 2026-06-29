@@ -63,12 +63,12 @@ from preprocessing import preprocess_signal, extract_features
 @st.cache_resource
 def load_classifier(path):
     import tensorflow as tf
-    return tf.keras.models.load_model(path) if os.path.exists(path) else None
+    return tf.keras.models.load_model(path, compile=False) if os.path.exists(path) else None
 
 @st.cache_resource
 def load_generator(path):
     import tensorflow as tf
-    return tf.keras.models.load_model(path) if os.path.exists(path) else None
+    return tf.keras.models.load_model(path, compile=False) if os.path.exists(path) else None
 
 @st.cache_data
 def get_avg_bounds(base_dir):
@@ -117,16 +117,16 @@ with st.sidebar:
     st.markdown("### Pipeline")
     st.markdown("""
 1. **Download** PhysioNet recordings
-2. **Preprocess** → bandpass + MFCC
+2. **Preprocess** -> bandpass + MFCC + log-mel
 3. **Train GAN** on abnormal segments
 4. **Augment** dataset → balanced
-5. **Train Classifier** with Focal Loss
+5. **Train CNN-BiGRU** with binary cross-entropy
 6. **Evaluate** & compare
     """)
 
     st.markdown("---")
     st.markdown("### About")
-    st.caption("WGAN-GP · Multi-Scale Conv1D · SE Attention · MixUp · Focal Loss")
+    st.caption("Small DCGAN + compact Conv1D classifier")
 
 
 # ─────────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ with st.sidebar:
 
 def plot_feature_subgroups(features_arr, title_prefix="Sample", figsize=(18, 3.5)):
     """
-    features_arr: (N, 64, 39)
+    features_arr: (N, 64, feature_dim)
     Returns a matplotlib Figure showing MFCC / Delta / Delta-Delta in separate panels.
     """
     N = len(features_arr)
@@ -161,8 +161,8 @@ def plot_feature_subgroups(features_arr, title_prefix="Sample", figsize=(18, 3.5
     return fig
 
 
-def plot_full_heatmap(feature_39, title="MFCC+Δ+ΔΔ Heatmap"):
-    """Single full 39-feature heatmap."""
+def plot_full_heatmap(feature_39, title="Feature Heatmap"):
+    """Single full feature heatmap."""
     fig, ax = plt.subplots(figsize=(10, 3.5))
     im = ax.imshow(feature_39.T, cmap="coolwarm", aspect="auto", origin="lower")
     ax.set_title(title, fontsize=12, fontweight="bold")
@@ -199,6 +199,12 @@ with tab1:
         st.error(f"Classifier model not found. Train it first with `python train_classifier.py`.")
 
     uploaded = st.file_uploader("Upload heart sound (.wav)", type=["wav"], key="cls_upload")
+    operating_mode = st.radio(
+        "Operating mode",
+        ["screening", "balanced", "specificity"],
+        horizontal=True,
+        help="Screening catches more abnormal cases. Balanced is even. Specificity reduces false positives.",
+    )
 
     if uploaded and cls_ok:
         temp_dir = os.path.join(base_dir, "temp")
@@ -220,17 +226,21 @@ with tab1:
 
             # ── Run inference ─────────────────────────────────
             with st.spinner("Running classifier…"):
-                result = predict(temp_path, model=classifier)
+                result = predict(temp_path, model=classifier, mode=operating_mode)
 
             predicted_class = result["class"]
             confidence      = result["confidence"] * 100
+            abnormal_prob   = result.get("abnormal_probability", 0.0)
+            threshold       = result.get("threshold", 0.5)
+            recommendation  = result.get("recommendation", "")
             seg_probs       = np.array(result["segment_probs"])
             n_segs          = result["num_segments"]
 
             # ── Top result banner ─────────────────────────────
             is_abnormal = predicted_class == "Abnormal"
-            banner_color = "#e55353" if is_abnormal else "#2eb85c"
-            icon = "⚠️" if is_abnormal else "✅"
+            is_uncertain = predicted_class == "Uncertain"
+            banner_color = "#e55353" if is_abnormal else ("#f0ad4e" if is_uncertain else "#2eb85c")
+            icon = "!" if is_abnormal else ("?" if is_uncertain else "OK")
 
             st.markdown(f"""
             <div style="background:{banner_color}22; border:2px solid {banner_color};
@@ -241,14 +251,16 @@ with tab1:
                 <span style="font-size:1.1rem; color:#ccc; margin-left:16px;">
                     Confidence: <b style="color:{banner_color}">{confidence:.1f}%</b>
                 </span>
+                <div style="font-size:0.95rem; color:#ddd; margin-top:10px;">{recommendation}</div>
             </div>""", unsafe_allow_html=True)
 
             # ── KPI row ───────────────────────────────────────
-            k1, k2, k3, k4 = st.columns(4)
+            k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric("Confidence",   f"{confidence:.1f}%")
-            k2.metric("Segments",     n_segs)
-            k3.metric("Duration",     f"{duration:.2f}s")
-            k4.metric("Sample Rate",  f"{orig_fs} Hz")
+            k2.metric("Abnormal Prob.", f"{abnormal_prob:.3f}")
+            k3.metric("Threshold", f"{threshold:.3f}")
+            k4.metric("Segments",     n_segs)
+            k5.metric("Duration",     f"{duration:.2f}s")
 
             # ── Waveform + full heatmap ───────────────────────
             col_w, col_h = st.columns(2)
@@ -265,12 +277,12 @@ with tab1:
                 plt.close(fig_w)
 
             with col_h:
-                st.subheader("39-Feature Heatmap")
+                st.subheader("MFCC + Log-Mel Feature Heatmap")
                 y_res = librosa.resample(y_raw, orig_sr=orig_fs, target_sr=2000) if orig_fs != 2000 else y_raw
                 y_filt = preprocess_signal(y_res, fs=2000)
                 seg0 = y_filt[:5040] if len(y_filt) >= 5040 else np.pad(y_filt, (0, 5040 - len(y_filt)))
-                feats0 = extract_features(seg0, fs=2000)["mfcc"]   # (64, 39)
-                fig_h = plot_full_heatmap(feats0, "First Segment — MFCC + Δ + ΔΔ")
+                feats0 = extract_features(seg0, fs=2000)["mfcc"]
+                fig_h = plot_full_heatmap(feats0, "First Segment - MFCC + Log-Mel")
                 st.pyplot(fig_h)
                 plt.close(fig_h)
 

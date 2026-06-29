@@ -7,6 +7,9 @@ import librosa
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+
+FEATURE_KEY = "features"
+
 def butter_bandpass(lowcut, highcut, fs, order=4):
     """
     Design a Butterworth bandpass filter.
@@ -54,56 +57,61 @@ def segment_signal(y, segment_len=5040, overlap=0):
         
     return segments
 
-def extract_features(y, fs=2000, n_fft=256, hop_length=80, n_mfcc=13):
+def normalize_feature_block(block):
+    """Scale one feature block to [-1, 1] for stable neural-network training."""
+    block_min, block_max = block.min(), block.max()
+    if block_max - block_min <= 0:
+        return np.zeros_like(block), np.array([block_min, block_max])
+    normalized = 2.0 * (block - block_min) / (block_max - block_min) - 1.0
+    return normalized, np.array([block_min, block_max])
+
+
+def fix_time_frames(features, target_frames=64):
+    """Pad or crop feature matrices to a fixed number of time frames."""
+    if features.shape[1] < target_frames:
+        pad_width = target_frames - features.shape[1]
+        features = np.pad(features, ((0, 0), (0, pad_width)), mode="constant")
+    return features[:, :target_frames]
+
+
+def extract_features(y, fs=2000, n_fft=256, hop_length=80, n_mfcc=13, n_mels=32):
     """
-    Extracts 13 MFCCs, Delta MFCCs, and Delta-Delta MFCCs from a segment of audio.
-    Concatenates them to form a (64, 39) feature matrix.
+    Extract MFCC + log-mel features from one audio segment.
+
+    Output shape is (64, 71):
+      - 39 MFCC-style features: MFCC + delta + delta-delta
+      - 32 log-mel spectrogram features
     """
-    # 1. Base MFCCs
     mfcc = librosa.feature.mfcc(y=y, sr=fs, n_fft=n_fft, hop_length=hop_length, n_mfcc=n_mfcc, center=True)
-    
-    # 2. First derivative (Delta MFCC)
     delta = librosa.feature.delta(mfcc)
-    
-    # 3. Second derivative (Delta-Delta MFCC)
     delta2 = librosa.feature.delta(mfcc, order=2)
-    
-    # Concatenate features vertically along the feature axis -> shape (39, 64)
-    features = np.vstack([mfcc, delta, delta2])
-    
-    # Min-max scale base MFCCs (first 13 features) together
-    mfcc_part = features[:13]
-    f_min, f_max = mfcc_part.min(), mfcc_part.max()
-    if f_max - f_min > 0:
-        mfcc_norm = 2.0 * (mfcc_part - f_min) / (f_max - f_min) - 1.0
-    else:
-        mfcc_norm = np.zeros_like(mfcc_part)
-        
-    # Min-max scale Delta features (13 to 26) together
-    delta_part = features[13:26]
-    d_min, d_max = delta_part.min(), delta_part.max()
-    if d_max - d_min > 0:
-        delta_norm = 2.0 * (delta_part - d_min) / (d_max - d_min) - 1.0
-    else:
-        delta_norm = np.zeros_like(delta_part)
-        
-    # Min-max scale Delta-Delta features (26 to 39) together
-    delta2_part = features[26:39]
-    d2_min, d2_max = delta2_part.min(), delta2_part.max()
-    if d2_max - d2_min > 0:
-        delta2_norm = 2.0 * (delta2_part - d2_min) / (d2_max - d2_min) - 1.0
-    else:
-        delta2_norm = np.zeros_like(delta2_part)
-        
-    # Concatenate back
-    features_norm = np.vstack([mfcc_norm, delta_norm, delta2_norm])
-    
-    # Transpose to (time_steps, features) -> (64, 39)
-    features_norm_t = features_norm.T
+
+    mel = librosa.feature.melspectrogram(
+        y=y,
+        sr=fs,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels,
+        fmin=25,
+        fmax=400,
+        center=True,
+    )
+    log_mel = librosa.power_to_db(mel, ref=np.max)
+
+    mfcc_features = fix_time_frames(np.vstack([mfcc, delta, delta2]))
+    log_mel = fix_time_frames(log_mel)
+
+    mfcc_norm, mfcc_bounds = normalize_feature_block(mfcc_features)
+    log_mel_norm, mel_bounds = normalize_feature_block(log_mel)
+    combined = np.vstack([mfcc_norm, log_mel_norm]).T
     
     feature_dict = {
-        'mfcc': features_norm_t,
-        'mfcc_bounds': np.array([f_min, f_max])
+        FEATURE_KEY: combined,
+        'mfcc': combined,
+        'mfcc_only': mfcc_norm.T,
+        'log_mel': log_mel_norm.T,
+        'mfcc_bounds': mfcc_bounds,
+        'mel_bounds': mel_bounds,
     }
     
     return feature_dict
@@ -115,6 +123,7 @@ def preprocess_subset(df_subset, raw_dir, fs=2000):
     mfcc_list = []
     labels_list = []
     bounds_list = []
+    source_list = []
     
     for idx, row in df_subset.iterrows():
         filepath = os.path.join(raw_dir, row['filename'])
@@ -137,9 +146,10 @@ def preprocess_subset(df_subset, raw_dir, fs=2000):
             
             for seg in segments:
                 features = extract_features(seg, fs=fs)
-                mfcc_list.append(features['mfcc'])
+                mfcc_list.append(features[FEATURE_KEY])
                 labels_list.append(label)
                 bounds_list.append(features['mfcc_bounds'])
+                source_list.append(row['filename'])
                 
         except Exception as e:
             print(f"Error processing file {row['filename']}: {e}")
@@ -148,7 +158,8 @@ def preprocess_subset(df_subset, raw_dir, fs=2000):
     y_arr = np.array(labels_list, dtype=np.int32)
     bounds = np.array(bounds_list, dtype=np.float32)
     
-    return X, y_arr, bounds
+    sources = np.array(source_list)
+    return X, y_arr, bounds, sources
 
 def process_dataset(raw_dir='data/raw', processed_dir='data/processed', fs=2000):
     """
@@ -202,19 +213,21 @@ def process_dataset(raw_dir='data/raw', processed_dir='data/processed', fs=2000)
     # Write splitting manifests to verify
     with open(os.path.join(processed_dir, 'train_source_files.txt'), 'w') as f:
         f.write("\n".join(sorted(list(train_recordings))))
+    with open(os.path.join(processed_dir, 'val_source_files.txt'), 'w') as f:
+        f.write("\n".join(sorted(list(val_recordings))))
     with open(os.path.join(processed_dir, 'test_source_files.txt'), 'w') as f:
         f.write("\n".join(sorted(list(test_recordings))))
     print("  Split source filename logs saved to processed dir.")
     
     # 3. Preprocess subsets separately
     print("\nSegmenting and extracting features for Train split...")
-    X_train, y_train, bounds_train = preprocess_subset(df_train, raw_dir, fs)
+    X_train, y_train, bounds_train, sources_train = preprocess_subset(df_train, raw_dir, fs)
     
     print("Segmenting and extracting features for Val split...")
-    X_val, y_val, bounds_val = preprocess_subset(df_val, raw_dir, fs)
+    X_val, y_val, bounds_val, sources_val = preprocess_subset(df_val, raw_dir, fs)
     
     print("Segmenting and extracting features for Test split...")
-    X_test, y_test, bounds_test = preprocess_subset(df_test, raw_dir, fs)
+    X_test, y_test, bounds_test, sources_test = preprocess_subset(df_test, raw_dir, fs)
     
     # Segment distribution summary
     print("\nPreprocessed segment-level counts (after windowing):")
@@ -226,14 +239,17 @@ def process_dataset(raw_dir='data/raw', processed_dir='data/processed', fs=2000)
     np.save(os.path.join(processed_dir, 'X_train.npy'), X_train)
     np.save(os.path.join(processed_dir, 'y_train.npy'), y_train)
     np.save(os.path.join(processed_dir, 'bounds_train.npy'), bounds_train)
+    np.save(os.path.join(processed_dir, 'sources_train.npy'), sources_train)
     
     np.save(os.path.join(processed_dir, 'X_val.npy'), X_val)
     np.save(os.path.join(processed_dir, 'y_val.npy'), y_val)
     np.save(os.path.join(processed_dir, 'bounds_val.npy'), bounds_val)
+    np.save(os.path.join(processed_dir, 'sources_val.npy'), sources_val)
     
     np.save(os.path.join(processed_dir, 'X_test.npy'), X_test)
     np.save(os.path.join(processed_dir, 'y_test.npy'), y_test)
     np.save(os.path.join(processed_dir, 'bounds_test.npy'), bounds_test)
+    np.save(os.path.join(processed_dir, 'sources_test.npy'), sources_test)
     
     print(f"\nAll processed splits saved successfully in {processed_dir}")
 

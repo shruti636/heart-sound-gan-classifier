@@ -1,11 +1,12 @@
 import os
+import json
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import tensorflow as tf
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, precision_recall_fscore_support
+from sklearn.metrics import confusion_matrix, roc_curve, auc
 from sklearn.manifold import TSNE
 import librosa
 import librosa.display
@@ -14,30 +15,145 @@ import librosa.display
 np.random.seed(42)
 tf.random.set_seed(42)
 
-def evaluate_model(model_path, X_test, y_test):
+def metrics_at_threshold(y_true, probs, threshold):
+    """Compute binary metrics at a chosen abnormal probability threshold."""
+    preds = (probs >= threshold).astype(np.int32)
+    cm = confusion_matrix(y_true, preds, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+
+    accuracy = (tp + tn) / max(tp + tn + fp + fn, 1)
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    specificity = tn / max(tn + fp, 1)
+    npv = tn / max(tn + fn, 1)
+    f1 = 2 * precision * recall / max(precision + recall, 1e-8)
+    balanced_accuracy = (recall + specificity) / 2
+
+    return {
+        "preds": preds,
+        "cm": cm,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "specificity": specificity,
+        "npv": npv,
+        "f1": f1,
+        "balanced_accuracy": balanced_accuracy,
+    }
+
+
+def choose_threshold(y_true, probs, min_recall=0.90):
+    """Pick a validation threshold that keeps recall high and reduces false alarms."""
+    candidates = np.linspace(0.05, 0.95, 181)
+    scored = []
+    for threshold in candidates:
+        m = metrics_at_threshold(y_true, probs, threshold)
+        scored.append((threshold, m))
+
+    high_recall = [(t, m) for t, m in scored if min_recall is not None and m["recall"] >= min_recall]
+    if high_recall:
+        threshold, metric = max(
+            high_recall,
+            key=lambda item: (item[1]["specificity"], item[1]["f1"], item[1]["balanced_accuracy"]),
+        )
+    else:
+        threshold, metric = max(scored, key=lambda item: (item[1]["balanced_accuracy"], item[1]["f1"]))
+
+    return float(threshold), metric
+
+
+def choose_specificity_threshold(y_true, probs, min_specificity=0.70):
+    """Pick a threshold that reduces false positives while keeping recall as high as possible."""
+    candidates = np.linspace(0.05, 0.95, 181)
+    scored = []
+    for threshold in candidates:
+        m = metrics_at_threshold(y_true, probs, threshold)
+        scored.append((threshold, m))
+
+    high_specificity = [(t, m) for t, m in scored if m["specificity"] >= min_specificity]
+    if high_specificity:
+        threshold, metric = max(
+            high_specificity,
+            key=lambda item: (item[1]["recall"], item[1]["balanced_accuracy"], item[1]["f1"]),
+        )
+    else:
+        threshold, metric = max(scored, key=lambda item: (item[1]["specificity"], item[1]["balanced_accuracy"]))
+
+    return float(threshold), metric
+
+
+def plot_calibration_curve(y_true, probs, title, save_path, n_bins=10):
+    """Reliability plot: predicted confidence vs observed abnormal rate."""
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    bin_ids = np.digitize(probs, bins) - 1
+    observed, predicted = [], []
+
+    for bin_idx in range(n_bins):
+        mask = bin_ids == bin_idx
+        if np.any(mask):
+            observed.append(np.mean(y_true[mask]))
+            predicted.append(np.mean(probs[mask]))
+
+    plt.figure(figsize=(6, 5))
+    plt.plot([0, 1], [0, 1], "--", color="gray", label="Perfect calibration")
+    plt.plot(predicted, observed, marker="o", label="Model")
+    plt.xlabel("Mean predicted abnormal probability")
+    plt.ylabel("Observed abnormal rate")
+    plt.title(title)
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=140)
+    plt.close()
+
+
+def plot_threshold_curve(y_true, probs, title, save_path):
+    """Show recall/specificity tradeoff for many thresholds."""
+    thresholds = np.linspace(0.05, 0.95, 181)
+    recalls, specificities, balanced = [], [], []
+    for threshold in thresholds:
+        m = metrics_at_threshold(y_true, probs, threshold)
+        recalls.append(m["recall"])
+        specificities.append(m["specificity"])
+        balanced.append(m["balanced_accuracy"])
+
+    plt.figure(figsize=(7, 5))
+    plt.plot(thresholds, recalls, label="Recall")
+    plt.plot(thresholds, specificities, label="Specificity")
+    plt.plot(thresholds, balanced, label="Balanced accuracy")
+    plt.xlabel("Abnormal probability threshold")
+    plt.ylabel("Metric value")
+    plt.title(title)
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=140)
+    plt.close()
+
+
+def evaluate_model(model_path, X_test, y_test, threshold=0.5):
     """
     Loads a model and evaluates it, returning predictions, probabilities, and core metrics.
     """
-    model = tf.keras.models.load_model(model_path)
+    model = tf.keras.models.load_model(model_path, compile=False)
     probs = model.predict(X_test).flatten()
-    preds = (probs >= 0.5).astype(np.int32)
-    
-    # Calculate metrics
-    cm = confusion_matrix(y_test, preds)
-    precision, recall, f1, _ = precision_recall_fscore_support(y_test, preds, average='binary')
-    accuracy = np.mean(preds == y_test)
+    threshold_metrics = metrics_at_threshold(y_test, probs, threshold)
     
     fpr, tpr, _ = roc_curve(y_test, probs)
     roc_auc = auc(fpr, tpr)
     
     return {
-        'preds': preds,
+        'threshold': threshold,
+        'preds': threshold_metrics['preds'],
         'probs': probs,
-        'cm': cm,
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
+        'cm': threshold_metrics['cm'],
+        'accuracy': threshold_metrics['accuracy'],
+        'precision': threshold_metrics['precision'],
+        'recall': threshold_metrics['recall'],
+        'specificity': threshold_metrics['specificity'],
+        'npv': threshold_metrics['npv'],
+        'f1': threshold_metrics['f1'],
+        'balanced_accuracy': threshold_metrics['balanced_accuracy'],
         'auc': roc_auc,
         'fpr': fpr,
         'tpr': tpr
@@ -47,7 +163,7 @@ def run_tsne_validation(X_real_abnormal, X_generated_abnormal, save_path):
     """
     Applies t-SNE to project real and generated abnormal MFCC features into 2D space.
     """
-    # Flatten shapes: (N, 64, 39) -> (N, 2496)
+    # Flatten shapes: (N, time, features) -> (N, time * features)
     real_flat = X_real_abnormal.reshape(X_real_abnormal.shape[0], -1)
     gen_flat = X_generated_abnormal.reshape(X_generated_abnormal.shape[0], -1)
     
@@ -80,6 +196,8 @@ def run_evaluation_study(processed_dir='data/processed', model_dir='models', out
     # Load splits
     X_train = np.load(os.path.join(processed_dir, 'X_train.npy'))
     y_train = np.load(os.path.join(processed_dir, 'y_train.npy'))
+    X_val = np.load(os.path.join(processed_dir, 'X_val.npy'))
+    y_val = np.load(os.path.join(processed_dir, 'y_val.npy'))
     X_test = np.load(os.path.join(processed_dir, 'X_test.npy'))
     y_test = np.load(os.path.join(processed_dir, 'y_test.npy'))
     bounds_train = np.load(os.path.join(processed_dir, 'bounds_train.npy'))
@@ -88,18 +206,80 @@ def run_evaluation_study(processed_dir='data/processed', model_dir='models', out
     path_nogan = os.path.join(model_dir, 'cnn_classifier_nogan.keras')
     path_gan = os.path.join(model_dir, 'cnn_classifier_gan.keras')
     
+    print("Choosing thresholds on validation data...")
+    model_nogan = tf.keras.models.load_model(path_nogan, compile=False)
+    model_gan = tf.keras.models.load_model(path_gan, compile=False)
+    probs_val_nogan = model_nogan.predict(X_val).flatten()
+    probs_val_gan = model_gan.predict(X_val).flatten()
+    thr_nogan, val_metrics_nogan = choose_threshold(y_val, probs_val_nogan, min_recall=0.90)
+    thr_gan, val_metrics_gan = choose_threshold(y_val, probs_val_gan, min_recall=0.90)
+    balanced_thr_nogan, balanced_val_nogan = choose_threshold(y_val, probs_val_nogan, min_recall=None)
+    balanced_thr_gan, balanced_val_gan = choose_threshold(y_val, probs_val_gan, min_recall=None)
+    specificity_thr_nogan, specificity_val_nogan = choose_specificity_threshold(y_val, probs_val_nogan)
+    specificity_thr_gan, specificity_val_gan = choose_specificity_threshold(y_val, probs_val_gan)
+
+    threshold_config = {
+        'cnn_classifier_nogan.keras': {
+            'threshold': thr_nogan,
+            'screening_threshold': thr_nogan,
+            'balanced_threshold': balanced_thr_nogan,
+            'specificity_threshold': specificity_thr_nogan,
+            'validation_recall': val_metrics_nogan['recall'],
+            'validation_specificity': val_metrics_nogan['specificity'],
+            'balanced_validation_recall': balanced_val_nogan['recall'],
+            'balanced_validation_specificity': balanced_val_nogan['specificity'],
+            'specificity_validation_recall': specificity_val_nogan['recall'],
+            'specificity_validation_specificity': specificity_val_nogan['specificity'],
+        },
+        'cnn_classifier_gan.keras': {
+            'threshold': thr_gan,
+            'screening_threshold': thr_gan,
+            'balanced_threshold': balanced_thr_gan,
+            'specificity_threshold': specificity_thr_gan,
+            'validation_recall': val_metrics_gan['recall'],
+            'validation_specificity': val_metrics_gan['specificity'],
+            'balanced_validation_recall': balanced_val_gan['recall'],
+            'balanced_validation_specificity': balanced_val_gan['specificity'],
+            'specificity_validation_recall': specificity_val_gan['recall'],
+            'specificity_validation_specificity': specificity_val_gan['specificity'],
+        },
+        'uncertain_margin': 0.08,
+        'note': 'Thresholds are selected on validation data. Scores near the threshold should be treated as uncertain.',
+    }
+    with open(os.path.join(model_dir, 'model_thresholds.json'), 'w') as f:
+        json.dump(threshold_config, f, indent=2)
+    print(f"Baseline threshold: {thr_nogan:.3f} | GAN threshold: {thr_gan:.3f}")
+
+    plot_dir = os.path.join(outputs_dir, 'plots')
+    plot_calibration_curve(
+        y_val,
+        probs_val_gan,
+        "GAN Model Calibration on Validation Set",
+        os.path.join(plot_dir, 'calibration_curve_gan.png'),
+    )
+    plot_threshold_curve(
+        y_val,
+        probs_val_gan,
+        "GAN Threshold Tradeoff on Validation Set",
+        os.path.join(plot_dir, 'threshold_tradeoff_gan.png'),
+    )
+
     print("Evaluating Baseline Model (No GAN)...")
-    res_nogan = evaluate_model(path_nogan, X_test, y_test)
+    res_nogan = evaluate_model(path_nogan, X_test, y_test, threshold=thr_nogan)
     
     print("Evaluating GAN-Augmented Model...")
-    res_gan = evaluate_model(path_gan, X_test, y_test)
+    res_gan = evaluate_model(path_gan, X_test, y_test, threshold=thr_gan)
     
     # 2. Save results CSV
     metrics_df = pd.DataFrame({
-        'Model': ['MFCC + CNN-LSTM (No GAN)', 'MFCC + GAN + CNN-LSTM'],
+        'Model': ['MFCC+LogMel + CNN-BiGRU (No GAN)', 'MFCC+LogMel + GAN + CNN-BiGRU'],
+        'Threshold': [res_nogan['threshold'], res_gan['threshold']],
         'Accuracy': [res_nogan['accuracy'], res_gan['accuracy']],
+        'BalancedAccuracy': [res_nogan['balanced_accuracy'], res_gan['balanced_accuracy']],
         'Precision': [res_nogan['precision'], res_gan['precision']],
         'Recall': [res_nogan['recall'], res_gan['recall']],
+        'Specificity': [res_nogan['specificity'], res_gan['specificity']],
+        'NPV': [res_nogan['npv'], res_gan['npv']],
         'F1-score': [res_nogan['f1'], res_gan['f1']],
         'AUC': [res_nogan['auc'], res_gan['auc']]
     })
@@ -107,6 +287,31 @@ def run_evaluation_study(processed_dir='data/processed', model_dir='models', out
     csv_path = os.path.join(outputs_dir, 'gan_vs_no_gan_results.csv')
     metrics_df.to_csv(csv_path, index=False)
     print(f"Performance metrics saved to {csv_path}")
+
+    threshold_rows = []
+    for model_name, model_path, probs, screening_thr, balanced_thr, specificity_thr in [
+        ('Baseline', path_nogan, res_nogan['probs'], thr_nogan, balanced_thr_nogan, specificity_thr_nogan),
+        ('GAN-Augmented', path_gan, res_gan['probs'], thr_gan, balanced_thr_gan, specificity_thr_gan),
+    ]:
+        for mode, threshold in [
+            ('screening', screening_thr),
+            ('balanced', balanced_thr),
+            ('specificity', specificity_thr),
+        ]:
+            m = metrics_at_threshold(y_test, probs, threshold)
+            threshold_rows.append({
+                'Model': model_name,
+                'Mode': mode,
+                'Threshold': threshold,
+                'Accuracy': m['accuracy'],
+                'BalancedAccuracy': m['balanced_accuracy'],
+                'Precision': m['precision'],
+                'Recall': m['recall'],
+                'Specificity': m['specificity'],
+                'NPV': m['npv'],
+                'F1-score': m['f1'],
+            })
+    pd.DataFrame(threshold_rows).to_csv(os.path.join(outputs_dir, 'threshold_analysis.csv'), index=False)
     
     # Calculate improvements
     acc_diff = res_gan['accuracy'] - res_nogan['accuracy']
@@ -258,9 +463,10 @@ def run_evaluation_study(processed_dir='data/processed', model_dir='models', out
         gen_means = np.mean(X_generated_abnormal, axis=(0, 1))
         gen_vars = np.var(X_generated_abnormal, axis=(0, 1))
         
-        # Spectral centroids proxy (center of mass of MFCCs)
-        real_centroid = np.mean([np.sum(seg * np.arange(39)) / (np.sum(seg) + 1e-6) for seg in X_real_abnormal])
-        gen_centroid = np.mean([np.sum(seg * np.arange(39)) / (np.sum(seg) + 1e-6) for seg in X_generated_abnormal])
+        # Feature-centroid proxy over the combined feature axis
+        feature_axis = np.arange(X_real_abnormal.shape[-1])
+        real_centroid = np.mean([np.sum(seg * feature_axis) / (np.sum(seg) + 1e-6) for seg in X_real_abnormal])
+        gen_centroid = np.mean([np.sum(seg * feature_axis) / (np.sum(seg) + 1e-6) for seg in X_generated_abnormal])
     else:
         X_generated_abnormal = None
         real_means, real_vars, gen_means, gen_vars = None, None, None, None
@@ -275,8 +481,8 @@ def run_evaluation_study(processed_dir='data/processed', model_dir='models', out
     norm_bounds = bounds_train[norm_idx]
     abnorm_bounds = bounds_train[abnorm_idx]
     
-    real_normal_mfcc = (((X_train[norm_idx] + 1.0) / 2.0) * (norm_bounds[1] - norm_bounds[0]) + norm_bounds[0]).T
-    real_abnormal_mfcc = (((X_train[abnorm_idx] + 1.0) / 2.0) * (abnorm_bounds[1] - abnorm_bounds[0]) + abnorm_bounds[0]).T
+    real_normal_mfcc = X_train[norm_idx].T
+    real_abnormal_mfcc = X_train[abnorm_idx].T
     
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     
@@ -293,9 +499,7 @@ def run_evaluation_study(processed_dir='data/processed', model_dir='models', out
     fig.colorbar(im1, ax=axes[1])
     
     if X_generated_abnormal is not None:
-        # Denormalize synthetic with avg bounds
-        avg_abnorm_bounds = np.mean(bounds_train[real_abnormal_idx], axis=0)
-        synth_single = (((X_generated_abnormal[0] + 1.0) / 2.0) * (avg_abnorm_bounds[1] - avg_abnorm_bounds[0]) + avg_abnorm_bounds[0]).T
+        synth_single = X_generated_abnormal[0].T
         
         im2 = axes[2].imshow(synth_single, cmap='coolwarm', aspect='auto', origin='lower')
         axes[2].set_title('GAN Synthetic Abnormal MFCC', fontsize=14, fontweight='bold')
@@ -322,15 +526,15 @@ def run_evaluation_study(processed_dir='data/processed', model_dir='models', out
     elif max_impr_val == auc_diff:
         max_impr_metric = "AUC Score"
         
-    report_md = f"""# Research Report: GAN-Based Data Augmentation for Heart Sound Classification
+    report_md = f"""# Research Report: Heart Sound Screening Assistant
 
 ## Executive Summary
-This report evaluates the effectiveness of Generative Adversarial Networks (GANs) to address class imbalance in the classification of Phonocardiogram (PCG) recordings from the official **PhysioNet Heart Sound Dataset (CinC Challenge 2016)**. We compare a Baseline hybrid Conv1D-LSTM model (trained only on real unbalanced data) with a GAN-Augmented model (where the training set is balanced by generating synthetic abnormal MFCC sequences).
+This report evaluates a research **screening assistant, not a diagnosis system**, for classifying Phonocardiogram (PCG) recordings from the **PhysioNet Heart Sound Dataset (CinC Challenge 2016)**. The project compares a baseline model with a GAN-augmented model and uses validation-selected thresholds instead of assuming a fixed 0.5 cutoff.
 
 ---
 
 ## Prevent Data Leakage validation Check
-To ensure scientific rigor, a recording-level split was implemented *before* signal segmentation. The overlap validation check verified:
+To reduce leakage risk, a recording-level split was implemented *before* signal segmentation. The overlap validation check verified:
 * **Overlapping recordings between splits**: 0 files.
 * **Leak-proof splitting**: Successful.
 
@@ -338,10 +542,21 @@ To ensure scientific rigor, a recording-level split was implemented *before* sig
 
 ## Quantitative Performance Comparison
 
-| Model | Accuracy | Precision | Recall | F1-score | AUC |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Baseline (No GAN)** | {res_nogan['accuracy']:.4f} | {res_nogan['precision']:.4f} | {res_nogan['recall']:.4f} | {res_nogan['f1']:.4f} | {res_nogan['auc']:.4f} |
-| **GAN-Augmented** | {res_gan['accuracy']:.4f} | {res_gan['precision']:.4f} | {res_gan['recall']:.4f} | {res_gan['f1']:.4f} | {res_gan['auc']:.4f} |
+| Model | Threshold | Accuracy | Balanced Accuracy | Precision | Recall | Specificity | NPV | F1-score | AUC |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Baseline (No GAN)** | {res_nogan['threshold']:.3f} | {res_nogan['accuracy']:.4f} | {res_nogan['balanced_accuracy']:.4f} | {res_nogan['precision']:.4f} | {res_nogan['recall']:.4f} | {res_nogan['specificity']:.4f} | {res_nogan['npv']:.4f} | {res_nogan['f1']:.4f} | {res_nogan['auc']:.4f} |
+| **GAN-Augmented** | {res_gan['threshold']:.3f} | {res_gan['accuracy']:.4f} | {res_gan['balanced_accuracy']:.4f} | {res_gan['precision']:.4f} | {res_gan['recall']:.4f} | {res_gan['specificity']:.4f} | {res_gan['npv']:.4f} | {res_gan['f1']:.4f} | {res_gan['auc']:.4f} |
+
+The thresholds above are selected on the validation split, not guessed at 0.5.
+Predictions close to the selected threshold should be treated as **Uncertain**
+and reviewed by a clinician.
+
+### Calibration and Threshold Safety
+The following plots are generated to inspect confidence quality and threshold tradeoffs:
+
+![Calibration Curve](plots/calibration_curve_gan.png)
+
+![Threshold Tradeoff](plots/threshold_tradeoff_gan.png)
 
 ### Relative Improvements:
 * **Accuracy Improvement**: {acc_diff*100:+.2f}%
@@ -361,7 +576,7 @@ t-SNE dimensionality reduction (from 2496 dimensions to 2D) was applied to the a
 ![t-SNE Scatter Plot](C:/Users/Administrator/.gemini/antigravity/brain/3aa12ee8-e339-450e-9a6a-0955397fb492/tsne_real_vs_generated.png)
 
 ### 2. Statistical Similarity
-We compared the distribution statistics of the 39 MFCC & Delta features:
+We compared the distribution statistics of the combined MFCC + log-mel features:
 * **Real Abnormal Means (average)**: {np.mean(real_means):.4f} (Variance: {np.mean(real_vars):.4f})
 * **Generated Abnormal Means (average)**: {np.mean(gen_means):.4f} (Variance: {np.mean(gen_vars):.4f})
 * **Average Spectral Centroid (MFCC-index equivalent)**:
@@ -396,8 +611,8 @@ The ROC curve comparison and training curve comparisons are illustrated below:
 ## Final Conclusions
 1. **Augmentation Benefit**: The GAN-augmented model **{improved_flag}** overall classification performance.
 2. **Most Improved Metric**: The metric that showed the largest improvement was **{max_impr_metric}** (with a change of **{max_impr_val*100:+.2f}%**).
-3. **Fidelity of Synthesis**: The generated MFCC samples appear realistic both visually (showing similar bands and temporal transitions in heatmaps) and mathematically (exhibiting high statistical similarity and feature space overlap in t-SNE).
-4. **Generalization Summary**: Utilizing a 1D DCGAN to augment minority classes is a highly beneficial strategy for heart sound signal classification, preventing overfitting to common class patterns and improving model sensitivity to abnormal murmurs.
+3. **Fidelity of Synthesis**: The generated feature samples appear realistic both visually (showing similar bands and temporal transitions in heatmaps) and mathematically (exhibiting statistical similarity and feature space overlap in t-SNE).
+4. **Clinical Safety Note**: This model is a research screening demo. It is not perfect, not medically certified, and must not be used as a stand-alone diagnosis. It should support, not replace, clinician review.
 """
     with open(report_path, 'w') as f:
         f.write(report_md)
