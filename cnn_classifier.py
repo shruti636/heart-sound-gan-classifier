@@ -92,6 +92,36 @@ def build_cnn_classifier(input_shape=(64, 71)):
     return Model(inputs, outputs, name="HeartSound_ResidualCNN_BiGRU_Attention")
 
 
+def build_light_cnn_classifier(input_shape=(64, 71)):
+    """
+    Build a lightweight Conv1D classifier to prevent overfitting on small datasets.
+    No BiGRU, no attention pooling.
+    """
+    inputs = layers.Input(shape=input_shape, name="heart_sound_features")
+    
+    # Conv Block 1
+    x = layers.Conv1D(32, 5, padding="same", kernel_regularizer=regularizers.l2(1e-4))(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation("relu")(x)
+    x = layers.MaxPooling1D(2)(x)
+    x = layers.Dropout(0.25)(x)
+    
+    # Conv Block 2
+    x = layers.Conv1D(64, 3, padding="same", kernel_regularizer=regularizers.l2(1e-4))(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation("relu")(x)
+    x = layers.MaxPooling1D(2)(x)
+    x = layers.Dropout(0.30)(x)
+    
+    # Flatten and Dense
+    x = layers.Flatten()(x)
+    x = layers.Dense(32, activation="relu", kernel_regularizer=regularizers.l2(1e-4))(x)
+    x = layers.Dropout(0.35)(x)
+    outputs = layers.Dense(1, activation="sigmoid", name="prediction")(x)
+    
+    return Model(inputs, outputs, name="HeartSound_LightweightCNN")
+
+
 if __name__ == "__main__":
     model = build_cnn_classifier()
     model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])

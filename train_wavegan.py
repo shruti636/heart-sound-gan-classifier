@@ -94,17 +94,19 @@ def load_and_segment_abnormal_waveforms(raw_dir='data/raw', fs=2000, segment_len
         raise FileNotFoundError(f"reference.csv manifest not found at {manifest_path}!")
         
     import pandas as pd
-    df = pd.read_csv(manifest_path, header=None)
-    # reference.csv structure: filename, label (1 for abnormal, -1 or 0 for normal)
-    df.columns = ['filename', 'label']
+    df = pd.read_csv(manifest_path)
     
-    abnormal_files = df[df['label'] == 1]['filename'].values
+    abnormal_files = df[df['label'].str.lower() == 'abnormal']['filename'].values
     print(f"Manifest indicates {len(abnormal_files)} abnormal recording files.")
     
     waveforms = []
     
     for fname in abnormal_files:
-        w_path = os.path.join(raw_dir, f"{fname}.wav")
+        if not fname.endswith('.wav'):
+            w_path = os.path.join(raw_dir, f"{fname}.wav")
+        else:
+            w_path = os.path.join(raw_dir, fname)
+            
         if not os.path.exists(w_path):
             continue
             
@@ -140,6 +142,7 @@ def train_wavegan(epochs=30, batch_size=16, latent_dim=100, raw_dir='data/raw', 
     # 1. Load raw audio waves
     print("Loading and segmenting abnormal heart audio waveforms...")
     real_waves = load_and_segment_abnormal_waveforms(raw_dir)
+    real_waves = real_waves[:256] # Sub-sample to speed up CPU training while allowing more epochs
     print(f"Loaded {len(real_waves)} raw abnormal waves of shape {real_waves.shape}.")
     
     if len(real_waves) == 0:
