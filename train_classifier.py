@@ -32,9 +32,14 @@ def class_weights(y):
 
 
 def compile_classifier(model):
+    try:
+        optimizer = tf.keras.optimizers.AdamW(learning_rate=7e-4, weight_decay=1e-4)
+    except AttributeError:
+        optimizer = tf.keras.optimizers.Adam(learning_rate=7e-4)
+
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-        loss="binary_crossentropy",
+        optimizer=optimizer,
+        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.03),
         metrics=[
             "accuracy",
             tf.keras.metrics.Precision(name="precision"),
@@ -48,7 +53,7 @@ def compile_classifier(model):
 def fit_and_save(model, X_train, y_train, X_val, y_val, checkpoint_path, epochs, batch_size):
     callbacks = [
         ModelCheckpoint(checkpoint_path, monitor="val_auc", mode="max", save_best_only=True, verbose=1),
-        EarlyStopping(monitor="val_auc", mode="max", patience=6, restore_best_weights=True),
+        EarlyStopping(monitor="val_auc", mode="max", patience=8, restore_best_weights=True),
         ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, min_lr=1e-5),
     ]
     return model.fit(
@@ -81,7 +86,28 @@ def check_recording_leakage(processed_dir):
     print("Recording leakage check passed.")
 
 
-def make_gan_augmented_training_set(X_train, y_train, model_dir, latent_dim=100, augmentation_ratio=0.5):
+def generate_filtered_synthetic(generator, discriminator, needed, latent_dim, pool_multiplier=4):
+    """Generate extra samples and keep the ones the discriminator finds most realistic."""
+    pool_size = max(needed * pool_multiplier, needed)
+    noise = tf.random.normal((pool_size, latent_dim))
+    candidates = generator(noise, training=False).numpy().astype(np.float32)
+
+    if discriminator is None:
+        return candidates[:needed]
+
+    scores = discriminator.predict(candidates, verbose=0).reshape(-1)
+    keep_order = np.argsort(scores)[::-1]
+    return candidates[keep_order[:needed]]
+
+
+def make_gan_augmented_training_set(
+    X_train,
+    y_train,
+    model_dir,
+    latent_dim=100,
+    augmentation_ratio=0.5,
+    filter_synthetic=True,
+):
     """Generate abnormal samples for part of the class gap.
 
     Full balancing can make the classifier over-predict Abnormal. A ratio of
@@ -108,8 +134,13 @@ def make_gan_augmented_training_set(X_train, y_train, model_dir, latent_dim=100,
             "GAN generator feature size does not match X_train. "
             "Run preprocessing.py and train_gan.py again before train_classifier.py."
         )
-    noise = tf.random.normal((needed, latent_dim))
-    X_synth = generator(noise, training=False).numpy().astype(np.float32)
+    discriminator = None
+    disc_path = os.path.join(model_dir, "gan_discriminator.keras")
+    if filter_synthetic and os.path.exists(disc_path):
+        discriminator = tf.keras.models.load_model(disc_path, compile=False)
+        print("Filtering synthetic samples with GAN discriminator.")
+
+    X_synth = generate_filtered_synthetic(generator, discriminator, needed, latent_dim)
     y_synth = np.ones(needed, dtype=np.float32)
 
     X_aug = np.concatenate([X_train, X_synth], axis=0)
@@ -125,6 +156,7 @@ def train_classifier_pipeline(
     model_dir="models",
     latent_dim=100,
     augmentation_ratio=0.5,
+    filter_synthetic=True,
 ):
     os.makedirs(model_dir, exist_ok=True)
 
@@ -161,6 +193,7 @@ def train_classifier_pipeline(
         model_dir,
         latent_dim,
         augmentation_ratio=augmentation_ratio,
+        filter_synthetic=filter_synthetic,
     )
     np.save(
         os.path.join(processed_dir, "split_counts.npy"),
@@ -188,10 +221,12 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--latent_dim", type=int, default=100)
     parser.add_argument("--augmentation_ratio", type=float, default=0.5)
+    parser.add_argument("--no_filter_synthetic", action="store_true")
     args = parser.parse_args()
     train_classifier_pipeline(
         args.epochs,
         args.batch_size,
         latent_dim=args.latent_dim,
         augmentation_ratio=args.augmentation_ratio,
+        filter_synthetic=not args.no_filter_synthetic,
     )

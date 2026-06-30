@@ -28,7 +28,7 @@ tf.random.set_seed(SEED)
 class SimpleGAN:
     """Small wrapper that keeps generator/discriminator training together."""
 
-    def __init__(self, input_shape=(64, 71), latent_dim=100, learning_rate=2e-4):
+    def __init__(self, input_shape=(64, 71), latent_dim=100, learning_rate=1e-4):
         self.latent_dim = latent_dim
         self.discriminator = build_discriminator(input_shape)
         self.generator = build_generator(latent_dim, feature_dim=input_shape[-1])
@@ -40,13 +40,16 @@ class SimpleGAN:
     def train_step(self, real_batch):
         batch_size = tf.shape(real_batch)[0]
         noise = tf.random.normal((batch_size, self.latent_dim))
+        input_noise = 0.03
 
         with tf.GradientTape() as disc_tape:
             fake_batch = self.generator(noise, training=True)
-            real_pred = self.discriminator(real_batch, training=True)
-            fake_pred = self.discriminator(fake_batch, training=True)
+            real_noisy = real_batch + tf.random.normal(tf.shape(real_batch), stddev=input_noise)
+            fake_noisy = fake_batch + tf.random.normal(tf.shape(fake_batch), stddev=input_noise)
+            real_pred = self.discriminator(real_noisy, training=True)
+            fake_pred = self.discriminator(fake_noisy, training=True)
 
-            real_loss = self.loss_fn(tf.ones_like(real_pred) * 0.9, real_pred)
+            real_loss = self.loss_fn(tf.ones_like(real_pred) * 0.85, real_pred)
             fake_loss = self.loss_fn(tf.zeros_like(fake_pred), fake_pred)
             disc_loss = real_loss + fake_loss
 

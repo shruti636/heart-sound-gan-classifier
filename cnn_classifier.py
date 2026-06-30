@@ -2,6 +2,7 @@
 
 import tensorflow as tf
 from tensorflow.keras import Model, layers
+from tensorflow.keras import regularizers
 
 
 def focal_loss(gamma=2.0, alpha=0.75):
@@ -23,8 +24,48 @@ def focal_loss(gamma=2.0, alpha=0.75):
     return loss_fn
 
 
+def residual_conv_block(x, filters, kernel_size, dropout):
+    """Small residual Conv1D block.
+
+    Residual connections help deeper models train without making the code hard
+    to follow: the block learns a correction on top of a simple shortcut.
+    """
+    shortcut = layers.Conv1D(filters, 1, padding="same")(x)
+
+    x = layers.SeparableConv1D(
+        filters,
+        kernel_size,
+        padding="same",
+        depthwise_regularizer=regularizers.l2(1e-4),
+        pointwise_regularizer=regularizers.l2(1e-4),
+    )(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation("relu")(x)
+
+    x = layers.SeparableConv1D(
+        filters,
+        kernel_size,
+        padding="same",
+        depthwise_regularizer=regularizers.l2(1e-4),
+        pointwise_regularizer=regularizers.l2(1e-4),
+    )(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Add()([shortcut, x])
+    x = layers.Activation("relu")(x)
+    x = layers.MaxPooling1D(2)(x)
+    return layers.SpatialDropout1D(dropout)(x)
+
+
+def attention_pooling(x):
+    """Let the model learn which time frames matter most."""
+    weights = layers.Dense(1, activation="tanh")(x)
+    weights = layers.Softmax(axis=1, name="time_attention")(weights)
+    weighted = layers.Multiply()([x, weights])
+    return layers.GlobalAveragePooling1D(name="attention_pool")(weighted)
+
+
 def build_cnn_classifier(input_shape=(64, 71)):
-    """Build a compact CNN + BiGRU classifier.
+    """Build a regularized CNN + BiGRU + attention classifier.
 
     Input shape:
         (64, 71) = 64 time frames, 39 MFCC features + 32 log-mel features.
@@ -34,23 +75,21 @@ def build_cnn_classifier(input_shape=(64, 71)):
     """
     inputs = layers.Input(shape=input_shape, name="heart_sound_features")
 
-    x = layers.Conv1D(48, 5, padding="same", activation="relu")(inputs)
-    x = layers.BatchNormalization()(x)
-    x = layers.MaxPooling1D(2)(x)
+    x = residual_conv_block(inputs, filters=64, kernel_size=5, dropout=0.20)
+    x = residual_conv_block(x, filters=96, kernel_size=3, dropout=0.25)
+
+    x = layers.Bidirectional(layers.GRU(64, return_sequences=True), name="bigru")(x)
+    attention_context = attention_pooling(x)
+    average_context = layers.GlobalAveragePooling1D()(x)
+    x = layers.Concatenate()([attention_context, average_context])
+
+    x = layers.Dense(96, activation="relu", kernel_regularizer=regularizers.l2(1e-4))(x)
+    x = layers.Dropout(0.35)(x)
+    x = layers.Dense(32, activation="relu", kernel_regularizer=regularizers.l2(1e-4))(x)
     x = layers.Dropout(0.20)(x)
-
-    x = layers.Conv1D(96, 3, padding="same", activation="relu")(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.MaxPooling1D(2)(x)
-    x = layers.Dropout(0.25)(x)
-
-    x = layers.Bidirectional(layers.GRU(48, return_sequences=False), name="bigru")(x)
-    x = layers.Dropout(0.30)(x)
-    x = layers.Dense(64, activation="relu")(x)
-    x = layers.Dropout(0.30)(x)
     outputs = layers.Dense(1, activation="sigmoid", name="prediction")(x)
 
-    return Model(inputs, outputs, name="HeartSound_CNN_BiGRU")
+    return Model(inputs, outputs, name="HeartSound_ResidualCNN_BiGRU_Attention")
 
 
 if __name__ == "__main__":

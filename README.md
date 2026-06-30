@@ -77,13 +77,17 @@ The GAN learns only from abnormal feature samples and saves:
 ### 4. Train classifiers
 
 ```bash
-python train_classifier.py --epochs 25 --batch_size 16
+python train_classifier.py --epochs 35 --batch_size 16 --augmentation_ratio 0.5
 ```
 
 This trains:
 
 - `models/cnn_classifier_nogan.keras`: baseline model.
 - `models/cnn_classifier_gan.keras`: model trained with GAN-balanced data.
+
+The default `augmentation_ratio=0.5` intentionally avoids adding too many GAN
+samples, which can reduce false positives compared with forcing perfect class
+balance. Synthetic samples are filtered by the GAN discriminator when available.
 
 ### 5. Evaluate
 
