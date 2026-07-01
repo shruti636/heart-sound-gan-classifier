@@ -49,7 +49,7 @@ GAN_EPOCHS = 100
 
 GAN_LEARNING_RATE = 0.0002
 
-GAN_AUGMENT_RATIO = 0.60
+GAN_AUGMENT_RATIO = 1.0
 
 # ==========================================================
 # CLASSIFIER PARAMETERS

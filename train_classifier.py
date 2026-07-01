@@ -51,7 +51,7 @@ def class_weights(y):
     }
 
 
-def compile_classifier(model, use_focal_loss=False):
+def compile_classifier(model, use_focal_loss=False, use_weighted_bce=True, pos_weight=1.5):
     try:
         optimizer = tf.keras.optimizers.AdamW(learning_rate=7e-4, weight_decay=1e-4)
     except AttributeError:
@@ -61,8 +61,13 @@ def compile_classifier(model, use_focal_loss=False):
         from cnn_classifier import focal_loss
         loss = focal_loss(gamma=2.0, alpha=0.75)
         print("Using Focal Loss for model compilation.")
+    elif use_weighted_bce:
+        from cnn_classifier import weighted_bce_loss
+        loss = weighted_bce_loss(pos_weight=pos_weight)
+        print(f"Using Weighted Binary Cross-Entropy (pos_weight={pos_weight:.4f}) for model compilation.")
     else:
         loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=0.03)
+        print("Using standard Binary Cross-Entropy for model compilation.")
 
     model.compile(
         optimizer=optimizer,
@@ -136,7 +141,7 @@ def make_gan_augmented_training_set(
 
     pool_size = max(needed * pool_multiplier, needed) if filter_synthetic else needed
 
-    from preprocessing import extract_features, FEATURE_KEY
+    from preprocessing import extract_features, FEATURE_KEY, preprocess_signal
 
     if use_wavegan:
         gen_path = os.path.join(model_dir, "wavegan_generator.keras")
@@ -181,7 +186,9 @@ def make_gan_augmented_training_set(
             max_val = np.max(np.abs(wave_out))
             if max_val > 0:
                 wave_out = wave_out / max_val
-            features = extract_features(wave_out, fs=2000)
+            # Apply bandpass filtering and normalization (Butterworth 25Hz-400Hz)
+            wave_filtered = preprocess_signal(wave_out, fs=2000)
+            features = extract_features(wave_filtered, fs=2000)
             X_candidates.append(features[FEATURE_KEY])
         X_candidates = np.array(X_candidates, dtype=np.float32)
         
@@ -249,7 +256,7 @@ def train_classifier_pipeline(
     processed_dir="data/processed",
     model_dir="models",
     latent_dim=100,
-    augmentation_ratio=0.5,
+    augmentation_ratio=1.0,
     filter_synthetic=True,
     spec_augment_enabled=False,
     use_wavegan=False,
@@ -289,7 +296,15 @@ def train_classifier_pipeline(
     print(f"Using {model_name} architecture.")
 
     print("\nStage 1: baseline classifier")
-    baseline = compile_classifier(build_fn(input_shape), use_focal_loss=use_focal_loss)
+    normal_count = max(np.sum(y_train == 0), 1)
+    abnormal_count = max(np.sum(y_train == 1), 1)
+    pos_weight = float(normal_count / abnormal_count)
+    baseline = compile_classifier(
+        build_fn(input_shape),
+        use_focal_loss=use_focal_loss,
+        use_weighted_bce=not use_focal_loss,
+        pos_weight=pos_weight,
+    )
     hist_base = fit_and_save(
         baseline,
         X_train,
@@ -319,7 +334,15 @@ def train_classifier_pipeline(
         np.array([np.sum(y_train == 0), np.sum(y_train == 1), np.sum(y_aug == 0), np.sum(y_aug == 1)]),
     )
 
-    gan_model = compile_classifier(build_fn(input_shape), use_focal_loss=use_focal_loss)
+    normal_count_aug = max(np.sum(y_aug == 0), 1)
+    abnormal_count_aug = max(np.sum(y_aug == 1), 1)
+    pos_weight_aug = float(normal_count_aug / abnormal_count_aug)
+    gan_model = compile_classifier(
+        build_fn(input_shape),
+        use_focal_loss=use_focal_loss,
+        use_weighted_bce=not use_focal_loss,
+        pos_weight=pos_weight_aug,
+    )
     hist_gan = fit_and_save(
         gan_model,
         X_aug,
@@ -339,7 +362,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--latent_dim", type=int, default=100)
-    parser.add_argument("--augmentation_ratio", type=float, default=0.5)
+    parser.add_argument("--augmentation_ratio", type=float, default=1.0)
     parser.add_argument("--no_filter_synthetic", action="store_true")
     parser.add_argument("--spec_augment", action="store_true", help="Enable SpecAugment on real training features")
     parser.add_argument("--use_wavegan", action="store_true", help="Use WaveGAN raw waveforms instead of feature-space GAN")

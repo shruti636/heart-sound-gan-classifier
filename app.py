@@ -161,18 +161,24 @@ def plot_feature_subgroups(features_arr, title_prefix="Sample", figsize=(18, 3.5
     return fig
 
 
-def plot_full_heatmap(feature_39, title="Feature Heatmap"):
-    """Single full feature heatmap."""
-    fig, ax = plt.subplots(figsize=(10, 3.5))
-    im = ax.imshow(feature_39.T, cmap="coolwarm", aspect="auto", origin="lower")
+def plot_full_heatmap(feature_dim, title="Feature Heatmap"):
+    """Single full feature heatmap (supports both 39-dim and 71-dim feature matrices)."""
+    fig, ax = plt.subplots(figsize=(10, 4.5 if feature_dim.shape[1] > 39 else 3.5))
+    im = ax.imshow(feature_dim.T, cmap="coolwarm", aspect="auto", origin="lower")
     ax.set_title(title, fontsize=12, fontweight="bold")
     ax.set_xlabel("Time frames")
-    ax.set_ylabel("Feature dim (0-38)")
+    ax.set_ylabel(f"Feature dim (0-{feature_dim.shape[1] - 1})")
     ax.axhline(12.5, color="white", lw=1.2, linestyle="--", alpha=0.6)
     ax.axhline(25.5, color="white", lw=1.2, linestyle="--", alpha=0.6)
+    
     ax.text(1, 6,  "MFCC",    color="white", fontsize=8, va="center", fontweight="bold")
     ax.text(1, 19, "Delta",   color="white", fontsize=8, va="center", fontweight="bold")
     ax.text(1, 32, "Δ-Delta", color="white", fontsize=8, va="center", fontweight="bold")
+    
+    if feature_dim.shape[1] > 39:
+        ax.axhline(38.5, color="white", lw=1.5, linestyle="-", alpha=0.8)
+        ax.text(1, 54, "Log-Mel", color="white", fontsize=8, va="center", fontweight="bold")
+        
     fig.colorbar(im, ax=ax)
     return fig
 
@@ -349,9 +355,8 @@ with tab1:
 with tab2:
     st.header("🎨 GAN Synthetic Abnormal Murmur Generator")
     st.markdown("""
-    The **Improved WGAN-GP Generator** maps random 100-dim noise → realistic `(64, 39)` MFCC features.
-    Three **separate output heads** (MFCC / Delta / Delta-Delta) make each feature group independently
-    controllable and visually distinct.
+    The **Progressive Wasserstein GAN (PWGAN)** generator maps random 100-dim noise → realistic `(64, 71)` MFCC + Log-Mel features.
+    It is trained progressively at resolutions 16, 32, and 64 time frames to maximize convergence stability and feature quality.
     """)
 
     if not gen_ok:

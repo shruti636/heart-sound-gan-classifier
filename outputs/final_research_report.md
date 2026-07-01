@@ -18,9 +18,9 @@
  
  | Model | Threshold | Accuracy | Balanced Accuracy | Precision | Recall | Specificity | NPV | F1-score | AUC |
  | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
- | **Baseline (No GAN)** | 0.510 | 0.6333 | 0.6806 | 0.5238 | 0.9167 | 0.4444 | 0.8889 | 0.6667 | 0.7639 |
- | **GAN-Augmented** | 0.520 | 0.7000 | 0.7361 | 0.5789 | 0.9167 | 0.5556 | 0.9091 | 0.7097 | 0.7546 |
- | **Ensemble (Baseline + GAN)** | 0.510 | 0.6333 | 0.6806 | 0.5238 | 0.9167 | 0.4444 | 0.8889 | 0.6667 | 0.7731 |
+ | **Baseline (No GAN)** | 0.520 | 0.6071 | 0.4722 | 0.0000 | 0.0000 | 0.9444 | 0.6296 | 0.0000 | 0.4889 |
+ | **GAN-Augmented** | 0.535 | 0.6071 | 0.6944 | 0.4762 | 1.0000 | 0.3889 | 1.0000 | 0.6452 | 0.6222 |
+ | **Ensemble (Baseline + GAN)** | 0.525 | 0.5000 | 0.6111 | 0.4167 | 1.0000 | 0.2222 | 1.0000 | 0.5882 | 0.5389 |
  
  The thresholds above are selected on the validation split, not guessed at 0.5.
  Predictions close to the selected threshold should be treated as **Uncertain**
@@ -34,10 +34,10 @@
  ![Threshold Tradeoff](plots/threshold_tradeoff_gan.png)
  
  ### Relative Improvements:
- * **Accuracy Improvement**: +6.67%
- * **Recall (Sensitivity) Improvement**: +0.00%
- * **F1-score Improvement**: +4.30%
- * **AUC Score Improvement**: -0.93%
+ * **Accuracy Improvement**: +0.00%
+ * **Recall (Sensitivity) Improvement**: +100.00%
+ * **F1-score Improvement**: +64.52%
+ * **AUC Score Improvement**: +13.33%
  
  ---
  
@@ -52,11 +52,11 @@
  
  ### 2. Statistical Similarity
  We compared the distribution statistics of the combined MFCC + log-mel features:
- * **Real Abnormal Means (average)**: 0.0931 (Variance: 0.0322)
- * **Generated Abnormal Means (average)**: 0.3672 (Variance: 0.0356)
+ * **Real Abnormal Means (average)**: 0.1272 (Variance: 0.0286)
+ * **Generated Abnormal Means (average)**: -0.0156 (Variance: 0.0413)
  * **Average Spectral Centroid (MFCC-index equivalent)**:
-   * Real Abnormal: Coefficient -45.94
-   * Generated Abnormal: Coefficient 14.32
+   * Real Abnormal: Coefficient -13.96
+   * Generated Abnormal: Coefficient 51.43
  
  These statistics are useful checks, but classifier performance and validation/test metrics are more important than visual similarity alone.
  
@@ -85,7 +85,7 @@
  
  ## Final Conclusions
  1. **GAN Result**: GAN augmentation improved the main screening metrics in this run.
- 2. **Best balanced setting**: Use **GAN-Augmented** in **screening** mode when you want the best balance of recall and specificity. Test balanced accuracy = **0.7361**.
- 3. **To reduce false positives**: Use **GAN-Augmented** in **balanced** mode. Test specificity = **0.7222**, recall = **0.7500**.
+ 2. **Best balanced setting**: Use **GAN-Augmented** in **screening** mode when you want the best balance of recall and specificity. Test balanced accuracy = **0.6944**.
+ 3. **To reduce false positives**: Use **GAN-Augmented** in **screening** mode. Test specificity = **0.3889**, recall = **1.0000**.
  4. **Clinical Safety Note**: This project is a research screening assistant, not a diagnosis system. It is not perfect, not medically certified, and must not be used as a stand-alone medical decision tool.
  

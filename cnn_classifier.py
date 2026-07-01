@@ -6,12 +6,7 @@ from tensorflow.keras import regularizers
 
 
 def focal_loss(gamma=2.0, alpha=0.75):
-    """Optional focal loss kept for older experiments and notebooks.
-
-    The simplified training script now uses binary cross-entropy by default,
-    because it is easier to understand and loads without custom objects.
-    """
-
+    """Optional focal loss kept for older experiments and notebooks."""
     def loss_fn(y_true, y_pred):
         y_true = tf.cast(y_true, tf.float32)
         y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
@@ -24,12 +19,19 @@ def focal_loss(gamma=2.0, alpha=0.75):
     return loss_fn
 
 
-def residual_conv_block(x, filters, kernel_size, dropout):
-    """Small residual Conv1D block.
+def weighted_bce_loss(pos_weight=1.5):
+    """Weighted Binary Cross-Entropy loss for handling class imbalance."""
+    def loss_fn(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
+        loss = - pos_weight * y_true * tf.math.log(y_pred) - (1.0 - y_true) * tf.math.log(1.0 - y_pred)
+        return tf.reduce_mean(loss)
+    loss_fn.__name__ = "weighted_bce_loss"
+    return loss_fn
 
-    Residual connections help deeper models train without making the code hard
-    to follow: the block learns a correction on top of a simple shortcut.
-    """
+
+def residual_conv_block(x, filters, kernel_size, dropout):
+    """Small residual Conv1D block."""
     shortcut = layers.Conv1D(filters, 1, padding="same")(x)
 
     x = layers.SeparableConv1D(
@@ -65,7 +67,7 @@ def attention_pooling(x):
 
 
 def build_cnn_classifier(input_shape=(64, 71)):
-    """Build a regularized CNN + BiGRU + attention classifier.
+    """Build a regularized CNN + BiLSTM + attention classifier.
 
     Input shape:
         (64, 71) = 64 time frames, 39 MFCC features + 32 log-mel features.
@@ -78,7 +80,7 @@ def build_cnn_classifier(input_shape=(64, 71)):
     x = residual_conv_block(inputs, filters=64, kernel_size=5, dropout=0.20)
     x = residual_conv_block(x, filters=96, kernel_size=3, dropout=0.25)
 
-    x = layers.Bidirectional(layers.GRU(64, return_sequences=True), name="bigru")(x)
+    x = layers.Bidirectional(layers.LSTM(64, return_sequences=True), name="bilstm")(x)
     attention_context = attention_pooling(x)
     average_context = layers.GlobalAveragePooling1D()(x)
     x = layers.Concatenate()([attention_context, average_context])
@@ -89,7 +91,7 @@ def build_cnn_classifier(input_shape=(64, 71)):
     x = layers.Dropout(0.20)(x)
     outputs = layers.Dense(1, activation="sigmoid", name="prediction")(x)
 
-    return Model(inputs, outputs, name="HeartSound_ResidualCNN_BiGRU_Attention")
+    return Model(inputs, outputs, name="HeartSound_ResidualCNN_BiLSTM_Attention")
 
 
 def build_light_cnn_classifier(input_shape=(64, 71)):

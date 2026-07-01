@@ -167,12 +167,11 @@ def fix_time_frames(features, target_frames=64):
 
 def extract_features(y, fs=2000, n_fft=256, hop_length=80, n_mfcc=13, n_mels=32):
     """
-    Extract MFCC + log-mel + spectral features from one audio segment.
+    Extract MFCC + log-mel features from one audio segment.
 
-    Output shape is (target_frames, 74):
+    Output shape is (target_frames, 71):
       - 39 MFCC-style features: MFCC + delta + delta-delta
       - 32 log-mel spectrogram features
-      - 3 extra features: zero-crossing rate, spectral centroid, rms energy
     """
     mfcc = librosa.feature.mfcc(y=y, sr=fs, n_fft=n_fft, hop_length=hop_length, n_mfcc=n_mfcc, center=True)
     delta = librosa.feature.delta(mfcc)
@@ -190,23 +189,16 @@ def extract_features(y, fs=2000, n_fft=256, hop_length=80, n_mfcc=13, n_mels=32)
     )
     log_mel = librosa.power_to_db(mel, ref=np.max)
 
-    # Extra features: ZCR, Spectral Centroid, RMS energy
-    zcr = librosa.feature.zero_crossing_rate(y=y, frame_length=n_fft, hop_length=hop_length)
-    centroid = librosa.feature.spectral_centroid(y=y, sr=fs, n_fft=n_fft, hop_length=hop_length)
-    rms = librosa.feature.rms(y=y, frame_length=n_fft, hop_length=hop_length)
-
     # Dynamic target time frames based on segment length
     target_frames = 25 if len(y) == 2000 else 64
 
     mfcc_features = fix_time_frames(np.vstack([mfcc, delta, delta2]), target_frames=target_frames)
     log_mel = fix_time_frames(log_mel, target_frames=target_frames)
-    extra_features = fix_time_frames(np.vstack([zcr, centroid, rms]), target_frames=target_frames)
 
     mfcc_norm, mfcc_bounds = normalize_feature_block(mfcc_features)
     log_mel_norm, mel_bounds = normalize_feature_block(log_mel)
-    extra_norm, _ = normalize_feature_block(extra_features)
     
-    combined = np.vstack([mfcc_norm, log_mel_norm, extra_norm]).T
+    combined = np.vstack([mfcc_norm, log_mel_norm]).T
     
     feature_dict = {
         FEATURE_KEY: combined,
